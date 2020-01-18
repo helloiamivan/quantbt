@@ -33,7 +33,7 @@ def createFolder(directory):
 
 # Core Portfolio Object
 class Portfolio:
-    def __init__(self,positions,cash,name='',datadump=False,backtestFolderName=os.getcwd())
+    def __init__(self,positions,cash,name='',datadump=False,backtestFolderName=os.getcwd()):
         
         # Portfolio Parameters
         self.name = name
@@ -122,7 +122,7 @@ class Portfolio:
     def getCustomDataByDate(self,date):
         if date in list(self.customData.keys()):
             return self.customData[date]
-        else
+        else:
             return dict()
     
     def getWeights(self,lastPriceMap):
