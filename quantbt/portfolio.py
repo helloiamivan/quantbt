@@ -323,7 +323,7 @@ class Portfolio:
 
         # Clean up the cash account at every rebalance
         # This assumes we buy lesser units when transaction costs are factored in rather than having residual cash balances
-        self.setCash(0)
+        self.setCash(0.0)
 
         # Initialize Slippage Costs
         slippageCosts = 0.0
@@ -386,7 +386,7 @@ class Portfolio:
                 self.sell(asset,-1*unitsToTrade,lastPriceMap)
 
             # Account for fixed transaction costs
-            if len(self.transactionCosts) > 0:
+            if len(self.fixedTransactionCosts) > 0:
 
                 tCosts = abs(unitsToTrade) * lastPriceMap[asset] * self.getFixedTransactionCosts(asset)
 
