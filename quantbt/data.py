@@ -22,18 +22,14 @@ class csvDataHandler:
     def getDataFromSource(self,source,formatOut='dataframe'):
         sourceName = self.datasources[source]
         try:
-            # TODO: Enhance the way data is read
-            data = pd.read_csv('data/' + sourceName)
-            data['Dates'] = pd.to_datetime(data['Dates'])
-            data.sort_values(by='Dates',inplace=True)
-            dates = data['Dates'].tolist()
+            data = pd.read_csv(f'data/{sourceName}',index_col=[0],parse_dates=True)
+            dates = list(data.index)
             
             if formatOut.lower() == 'dataframe':
-                return [dates,data.set_index('Dates')]
+                return [dates,data]
             
             elif formatOut.lower() == 'dictionary':
-                temp = data.set_index('Dates').T
-                return [dates,temp.to_dict()]
+                return [dates,data.to_dict(orient='index')]
 
             else:
                 raise Exception('ERROR: Invalid Output Format')
