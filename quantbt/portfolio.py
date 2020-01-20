@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 
+from .analytics import summaryStatistics
+
 def flattenDictionary(nestedDict):
     listofDict = []
 
@@ -49,6 +51,7 @@ class Portfolio:
         self.slippageCosts = 0.0
         self.LastRebalanceDate = 'N/A'
         self.FirstRebalanceDate = 'N/A'
+        self.performanceStatistics = dict()
 
         # Custom Data to serialize
         self.customData = dict()
@@ -201,6 +204,14 @@ class Portfolio:
         else:
             raise Exception('ERROR: Invalid Historical Slippage Costs Output Format')
     
+    def getPerformanceStatistics(self,historical=False):
+        perfStats = pd.DataFrame.from_dict(self.performanceStatistics,orient='index')
+        
+        if historical == False:
+            return perfStats.iloc[[-1]]
+        else:
+            return perfStats
+    
     # Set Methods
     def setCash(self,cash):
         if isinstance(cash,float):
@@ -294,6 +305,14 @@ class Portfolio:
         self.historicalTCosts[date] = float(copy.deepcopy(self.getTransactionCosts()))
         self.historicalSlippageCosts[date] = float(copy.deepcopy(self.getSlippageCosts()))
 
+        # Compute Performance Statistics
+        self.performanceStatistics[date] = summaryStatistics(
+            self.historicalNAV,
+            self.historicalWeights,
+            self.historicalPositions,
+            self.historicalTCosts,
+            self.historicalSlippageCosts)
+
         # Serialize Data
         if self.datadump == True:
             dataDump = self.getBacktestFolderName() + '/' + date.strftime('%Y-%m-%d') + '.json'
@@ -309,7 +328,8 @@ class Portfolio:
                 'SlippageModel'        : self.getSlippageModel(),
                 'Positions'            : self.getPositions(),
                 'Weights'              : self.getWeights(lastPriceMap),
-                'CustomData'           : self.getCustomDataByDate(date)  
+                'CustomData'           : self.getCustomDataByDate(date),
+                'Performance'          : self.performanceStatistics[date]
             }]
 
             # TODO: Fix date serialization instead of string defaults
