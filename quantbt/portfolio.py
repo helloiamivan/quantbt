@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 
-from .analytics import summaryStatistics
+from .analytics import summaryStatistics, getNAVPlot
 
 def flattenDictionary(nestedDict):
     listofDict = []
@@ -268,6 +268,10 @@ class Portfolio:
 
     def setSlippageCosts(self,slippageCosts):
         self.slippageCosts = slippageCosts
+    
+    # Analytics Functions
+    def plotNAV(self):
+        return getNAVPlot(self)
 
     # Portfolio Object Methods
     def buy(self,asset,quantity,lastPriceMap):

@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 
 def summaryStatistics(
     historicalNAV,
@@ -52,3 +53,9 @@ def summaryStatistics(
     }
 
     return stats
+
+def getNAVPlot(port):
+    nav = port.getHistoricalNAV()
+    name = port.getPortfolioName()
+    fig = nav.plot(figsize=(7.5,5),title=name)
+    return fig
