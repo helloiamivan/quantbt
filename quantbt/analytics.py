@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-def summaryStatistics(
+def performanceSummary(
     historicalNAV,
     historicalWeights,
     historicalPositions,
@@ -20,7 +20,7 @@ def summaryStatistics(
 
     # Annualized Volatility
     if len(returns) > 1:
-        annVolatility = returns.std() * np.sqrt(252)
+        annVolatility = returns.std() * np.sqrt(260)
     else:
         annVolatility = np.nan
 
@@ -29,6 +29,9 @@ def summaryStatistics(
 
     # Annualized Returns
     annReturns = (nav[-1] / nav[0]) ** (1/yearFraction) - 1
+
+    # Cumulative Returns
+    cumReturns = (nav[-1] / nav[0]) - 1
 
     # Annualized Sharpe Ratio (Add a tiny number to prevent divide by zero error)
     annSharpe = annReturns / ( annVolatility + np.finfo(float).eps )
@@ -45,11 +48,37 @@ def summaryStatistics(
     # Maximum Drawdown
     maxdrawdown = nav[maxdrawdownEnd] / nav[maxdrawdownStart] - 1
 
+    # Downside returns
+    downsideReturns = np.array([ret for ret in returns if ret < 0])
+
+    # Downside volatility
+    if len(downsideReturns > 1):
+        downsideVolatility = downsideReturns.std() * np.sqrt(260)
+    else:
+        downsideVolatility = np.nan
+
+    # Sortino Ratio
+    sortinoRatio = annReturns / downsideVolatility
+
+    # Calmar Ratio
+    calmarRatio = annReturns / maxdrawdown
+
+    # Latest Cumulative Transaction Costs
+    cumulativeTCost = list(historicalTCosts.values())[-1]
+
+    # Turnover
+
+    # Gross Leverage
+
     stats = {
-        'Ann. Returns'       : annReturns,
-        'Ann. Volatility'    : annVolatility,
-        'Ann. Sharpe Ratio'  : annSharpe,
-        'Maximum Drawdown'   : maxdrawdown
+        'Annual Returns'           : annReturns,
+        'Annual Volatility'        : annVolatility,
+        'Sharpe Ratio'             : annSharpe,
+        'Cumulative Return'        : cumReturns,
+        'Maximum Drawdown'         : maxdrawdown,
+        'Sortino Ratio'            : sortinoRatio,
+        'Calmar Ratio'             : calmarRatio,
+        'Total Transaction Costs'  : cumulativeTCost
     }
 
     return stats
@@ -58,4 +87,10 @@ def getNAVPlot(port):
     nav = port.getHistoricalNAV()
     name = port.getPortfolioName()
     fig = nav.plot(figsize=(7.5,5),title=name)
+    return fig
+
+def getWeightsPlot(port):
+    wgt = port.getHistoricalWeights()
+    name = port.getPortfolioName()
+    fig = wgt.plot(figsize=(7.5,5),title=f'{name} Weights')
     return fig

@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 
-from .analytics import summaryStatistics, getNAVPlot
+from .analytics import *
 
 def flattenDictionary(nestedDict):
     listofDict = []
@@ -43,6 +43,7 @@ class Portfolio:
         self.cash = cash
         self.datadump = datadump
         self.fixedTransactionCosts = dict()
+        self.borrowCosts = dict()
         self.annualManagementFee = 0.0
         self.slippageModel = ''
         self.impactParams = dict()
@@ -62,6 +63,8 @@ class Portfolio:
         self.historicalWeights = dict()
         self.historicalTCosts = dict()
         self.historicalSlippageCosts = dict()
+        self.historicalBorrowCosts = dict()
+        self.historicalCash = dict()
 
         # Utils        
         self.timestamp = ''.join(str(time.time()).split('.'))
@@ -93,10 +96,22 @@ class Portfolio:
         return list(self.positions.keys())
 
     def getFixedTransactionCosts(self,asset):
-        return self.fixedTransactionCosts[asset]
+        if asset not in self.fixedTransactionCosts.keys():
+            return 0.0
+        else:
+            return self.fixedTransactionCosts[asset]
     
     def getAllFixedTransactionCosts(self):
         return self.fixedTransactionCosts
+    
+    def getBorrowCost(self,asset):
+        if asset not in self.borrowCosts.keys():
+            return 0.0
+        else:
+            return self.borrowCosts[asset]
+
+    def getAllBorrowCosts(self):
+        return self.borrowCosts
 
     def getAnnualManagementFee(self):
         return self.annualManagementFee
@@ -203,6 +218,26 @@ class Portfolio:
             return self.historicalSlippageCosts
         else:
             raise Exception('ERROR: Invalid Historical Slippage Costs Output Format')
+
+    def getHistoricalBorrowCosts(self,formatOut='DataFrame'):
+        if formatOut.lower() == 'dataframe':
+            temp = pd.DataFrame(self.historicalBorrowCosts,index=[0],).T
+            temp.columns = [ 'Daily Borrow Costs']
+            return temp
+        elif formatOut.lower() == 'dictionary':
+            return self.historicalBorrowCosts
+        else:
+            raise Exception('ERROR: Invalid Historical Borrow Costs Output Format')
+    
+    def getHistoricalCash(self,formatOut='DataFrame'):
+        if formatOut.lower() == 'dataframe':
+            temp = pd.DataFrame(self.historicalCash,index=[0],).T
+            temp.columns = ['Historical Cash Account']
+            return temp
+        elif formatOut.lower() == 'dictionary':
+            return self.historicalCash
+        else:
+            raise Exception('ERROR: Invalid Historical Cash Account Output Format')
     
     def getPerformanceStatistics(self,historical=False):
         perfStats = pd.DataFrame.from_dict(self.performanceStatistics,orient='index')
@@ -211,7 +246,7 @@ class Portfolio:
             return perfStats.iloc[[-1]]
         else:
             return perfStats
-    
+
     # Set Methods
     def setCash(self,cash):
         if isinstance(cash,float):
@@ -224,6 +259,12 @@ class Portfolio:
             self.fixedTransactionCosts = fixedTransactionCosts
         else:
             raise Exception('ERROR: Transaction costs must be a dictionary of asset names and costs')
+    
+    def setBorrowCosts(self,fixedBorrowCosts):
+        if isinstance(fixedBorrowCosts,dict):
+            self.borrowCosts = fixedBorrowCosts
+        else:
+            raise Exception('ERROR: Borrow costs must be a dictionary of asset names and annualized costs')
     
     def setSlippageModel(self,slippageModel):
         validSlippageModels = ['squarerootimpact']
@@ -265,13 +306,16 @@ class Portfolio:
 
     def setTransactionCosts(self,transactionCosts):
         self.transactionCosts = transactionCosts
-
+    
     def setSlippageCosts(self,slippageCosts):
         self.slippageCosts = slippageCosts
-    
-    # Analytics Functions
+        
+    # Analytics methods
     def plotNAV(self):
         return getNAVPlot(self)
+
+    def plotWeights(self):
+        return getWeightsPlot(self)
 
     # Portfolio Object Methods
     def buy(self,asset,quantity,lastPriceMap):
@@ -293,14 +337,30 @@ class Portfolio:
             self.positions[asset] = -1 * quantity
             self.setCash(self.getCash() + (quantity * lastPriceMap[asset]))
     
+    def calcDailyBorrowCost(self,lastPriceMap):
+        # Initialize Zero Costs
+        borrowCostCollector = 0.0
+        
+        # Check if portfolio positions are empty
+        if len(self.positions) > 0:
+            for asset,position in self.positions.items():
+                # Only short positions incur borrow costs (annualized)
+                if position < 0 :
+                    borrowCostCollector += abs(position * lastPriceMap[asset] * ((1 + self.getBorrowCost(asset)) ** (1/260) - 1))
+
+        return borrowCostCollector
+    
     def signOff(self,date,lastPriceMap):
         # Add annual management fees
-        managementFee = self.getNAV(lastPriceMap) * self.getAnnualManagementFee() * (1/252)
+        managementFee = self.getNAV(lastPriceMap) * ((1 + self.getAnnualManagementFee()) ** (1/260) - 1)
         
-        # TODO: Add interest in cash account
+        # TODO: Compute net interest in cash account
         # interestCash = self.getCash() * overnightLIBOR * (1/252)
 
-        self.setCash(self.getCash() - managementFee)
+        # Add Borrow Costs
+        borrowCosts = self.calcDailyBorrowCost(lastPriceMap)
+
+        self.setCash(self.getCash() - managementFee - borrowCosts)
 
         # Historical daily states
         self.historicalPositions[date] = copy.deepcopy(self.getPositions())
@@ -308,9 +368,11 @@ class Portfolio:
         self.historicalWeights[date] = copy.deepcopy(self.getWeights(lastPriceMap))
         self.historicalTCosts[date] = float(copy.deepcopy(self.getTransactionCosts()))
         self.historicalSlippageCosts[date] = float(copy.deepcopy(self.getSlippageCosts()))
+        self.historicalBorrowCosts[date] = float(copy.deepcopy(borrowCosts))
+        self.historicalCash[date] = float(copy.deepcopy(self.getCash()))
 
         # Compute Performance Statistics
-        self.performanceStatistics[date] = summaryStatistics(
+        self.performanceStatistics[date] = performanceSummary(
             self.historicalNAV,
             self.historicalWeights,
             self.historicalPositions,
@@ -329,11 +391,12 @@ class Portfolio:
                 'LastRebalanceDate'    : self.getLastRebalanceDate(),
                 'TransactionCosts'     : self.getTransactionCosts(),
                 'FixedTransactionCosts': self.getAllFixedTransactionCosts(),
+                'DailyBorrowCost'      : self.historicalBorrowCosts[date],
                 'SlippageModel'        : self.getSlippageModel(),
                 'Positions'            : self.getPositions(),
                 'Weights'              : self.getWeights(lastPriceMap),
-                'CustomData'           : self.getCustomDataByDate(date),
-                'Performance'          : self.performanceStatistics[date]
+                'Performance'          : self.performanceStatistics[date],
+                'CustomData'           : self.getCustomDataByDate(date)
             }]
 
             # TODO: Fix date serialization instead of string defaults
