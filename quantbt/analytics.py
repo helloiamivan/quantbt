@@ -58,14 +58,16 @@ def performanceSummary(
         downsideVolatility = np.nan
 
     # Sortino Ratio
-    sortinoRatio = annReturns / downsideVolatility
+    sortinoRatio = annReturns / (downsideVolatility + np.finfo(float).eps)
 
     # Calmar Ratio
-    calmarRatio = annReturns / maxdrawdown
+    calmarRatio = annReturns / (maxdrawdown + np.finfo(float).eps)
 
     # Latest Cumulative Transaction Costs
     cumulativeTCost = list(historicalTCosts.values())[-1]
 
+    # Position Deltas
+    positionDeltas = historicalPositions.diff()
     # Turnover
 
     # Gross Leverage
