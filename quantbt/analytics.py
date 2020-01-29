@@ -65,9 +65,7 @@ def performanceSummary(
 
     # Latest Cumulative Transaction Costs
     cumulativeTCost = list(historicalTCosts.values())[-1]
-
-    # Position Deltas
-    positionDeltas = historicalPositions.diff()
+    
     # Turnover
 
     # Gross Leverage
