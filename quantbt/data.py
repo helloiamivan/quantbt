@@ -10,8 +10,9 @@ import warnings
 import requests
 import logging
 
-import numpy as np
+import numpy  as np
 import pandas as pd
+import yfinance as yf
 from datetime import datetime
 
 class csvDataHandler:
@@ -35,3 +36,21 @@ class csvDataHandler:
                 raise Exception('ERROR: Invalid Output Format')
         except:
             raise Exception(f'ERROR: Cannot read source {sourceName}')
+
+class yfDataHandler:
+    def __init__(self,tickers):
+        self.tickers = tickers
+    
+    def getDataFromSource(self, startDate, endDate, columns = ['Adj Close'],formatOut='dataframe'):
+
+        data = yf.download(self.tickers, startDate, endDate)
+
+        # Only use the CA Adjusted Close columns
+        data = data[columns]; data.columns = data.columns.droplevel()
+
+        dates = data.index
+
+        if formatOut.lower() == 'dataframe':
+            return [dates,data]
+        else:
+            return [dates,data.to_dict(orient='index')]
