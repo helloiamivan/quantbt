@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-from distutils.core import setup
+from setuptools import find_packages, setup
 
 setup(
     name='quantbt',
@@ -9,7 +9,9 @@ setup(
     author='Ivan Chan',
     author_email='ivanchanzhenghao@gmail.com',
     url='www.github.com/helloiamivan',
-    packages=['quantbt']
+    packages=find_packages(),
+    install_requires=["pandas", "matplotlib", "numpy", "yfinance"],
+    python_requires=">=3.9",
 )
 
 # Version History
