@@ -1,528 +1,353 @@
-import os
-import sys
-import time
+"""Portfolio state, rebalancing, and backtest history."""
+
+import copy
 import json
 import math
-import copy
-import base64
-import getpass
-import warnings
-import requests
-import logging
+import time
+from numbers import Real
+from pathlib import Path
 
-import numpy as np
 import pandas as pd
-from datetime import datetime
 
-from .analytics import *
+from .analytics import getNAVPlot, getWeightsPlot, performanceSummary
+
 
 def flattenDictionary(nestedDict):
-    listofDict = []
+    """Convert a date-keyed mapping of mappings into DataFrame-ready records."""
+    return [{"Dates": date, **values} for date, values in nestedDict.items()]
 
-    for key,value in nestedDict.items():
-        flatDict = nestedDict[key]
-        flatDict['Dates'] = key
-        listofDict.append(flatDict.copy())
 
-    return listofDict
+def sanitizeJSON(value):
+    """Recursively replace non-finite floats with ``None``.
 
-def createFolder(directory):
-    try:
-        if not os.path.exists(directory):
-            os.makedirs(directory)
-    except OSError:
-        print(f'Error: Creating directory {directory}')
+    Keeps daily dumps strict JSON (``json.dumps(..., allow_nan=False)``) instead
+    of writing the non-standard ``NaN`` literal that many parsers reject.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: sanitizeJSON(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [sanitizeJSON(val) for val in value]
+    return value
 
-# Core Portfolio Object
+
 class Portfolio:
-    def __init__(self,positions,cash,name='',datadump=False,backtestFolderName=os.getcwd()):
-        
-        # Portfolio Parameters
+    def __init__(self, positions, cash, name="", datadump=False, backtestFolderName=None):
         self.name = name
-        self.positions = positions
-        self.cash = cash
+        self.positions = dict(positions)
+        self.cash = float(cash)
         self.datadump = datadump
-        self.fixedTransactionCosts = dict()
-        self.borrowCosts = dict()
+        self.fixedTransactionCosts = {}
+        self.borrowCosts = {}
         self.annualManagementFee = 0.0
-        self.slippageModel = ''
-        self.impactParams = dict()
+        self.slippageModel = ""
+        self.impactParams = {}
         self.unwindUndefinedAssetWeights = True
+        # When False (default), rebalance() raises if cash would go negative for
+        # reasons other than the trading costs incurred during that rebalance.
+        # Set True to permit deliberate leverage / negative cash balances.
+        self.allowNegativeCash = False
         self.transactionCosts = 0.0
         self.slippageCosts = 0.0
-        self.LastRebalanceDate = 'N/A'
-        self.FirstRebalanceDate = 'N/A'
-        self.performanceStatistics = dict()
+        self.LastRebalanceDate = None
+        self.FirstRebalanceDate = None
+        self.performanceStatistics = {}
+        self.customData = {}
+        self.historicalNAV = {}
+        self.historicalPositions = {}
+        self.historicalWeights = {}
+        self.historicalTCosts = {}
+        self.historicalSlippageCosts = {}
+        self.historicalBorrowCosts = {}
+        self.historicalCash = {}
+        self.timestamp = str(time.time_ns())
+        root = Path(backtestFolderName) if backtestFolderName else Path.cwd()
+        self.backtestFolderName = root / "BackTestResults" / f"{self.timestamp}-{name}"
 
-        # Custom Data to serialize
-        self.customData = dict()
+    # Read API retained for compatibility with existing notebooks.
+    def getPortfolioName(self): return self.name
+    def getBacktestFolderName(self): return str(self.backtestFolderName)
+    def getPositions(self): return self.positions
+    def getAssetPosition(self, asset): return self.positions[asset]
+    def getCash(self): return self.cash
+    def getTransactionCosts(self): return self.transactionCosts
+    def getAssetsInPortfolio(self): return list(self.positions)
+    def getFixedTransactionCosts(self, asset): return self.fixedTransactionCosts.get(asset, 0.0)
+    def getAllFixedTransactionCosts(self): return self.fixedTransactionCosts
+    def getBorrowCost(self, asset): return self.borrowCosts.get(asset, 0.0)
+    def getAllBorrowCosts(self): return self.borrowCosts
+    def getAnnualManagementFee(self): return self.annualManagementFee
+    def getBacktestTimestamp(self): return self.timestamp
+    def getFirstRebalanceDate(self): return self.FirstRebalanceDate
+    def getLastRebalanceDate(self): return self.LastRebalanceDate
+    def getSlippageModel(self): return self.slippageModel
+    def getSlippageCosts(self): return self.slippageCosts
+    def getImpactParams(self): return self.impactParams
+    def getCustomData(self): return self.customData
+    def getCustomDataByDate(self, date): return self.customData.get(date, {})
 
-        # Time Series Data
-        self.historicalNAV = dict()
-        self.historicalPositions = dict()
-        self.historicalWeights = dict()
-        self.historicalTCosts = dict()
-        self.historicalSlippageCosts = dict()
-        self.historicalBorrowCosts = dict()
-        self.historicalCash = dict()
+    def getNAV(self, lastPriceMap):
+        return self.cash + sum(
+            lastPriceMap[asset] * position
+            for asset, position in self.positions.items()
+            if position
+        )
 
-        # Utils        
-        self.timestamp = ''.join(str(time.time()).split('.'))
-        self.backtestFolderName = backtestFolderName + '/BackTestResults/' + self.timestamp + '-' + self.name
+    def getWeights(self, lastPriceMap):
+        nav = self.getNAV(lastPriceMap)
+        if nav == 0:
+            return {asset: math.nan for asset in self.positions if self.positions[asset]}
+        return {
+            asset: lastPriceMap[asset] * position / nav
+            for asset, position in self.positions.items()
+            if position
+        }
 
-        # Create folder to store backtest results
-        createFolder(self.backtestFolderName)
+    @staticmethod
+    def _format_history(history, column_name, formatOut, nested=False):
+        format_out = formatOut.lower()
+        if format_out == "dictionary":
+            return history
+        if format_out != "dataframe":
+            raise ValueError("formatOut must be 'dataframe' or 'dictionary'")
+        if nested:
+            return pd.DataFrame(flattenDictionary(history)).set_index("Dates") if history else pd.DataFrame()
+        return pd.Series(history, name=column_name).to_frame()
 
-    # Get Methods
-    def getPortfolioName(self):
-        return self.name
-    
-    def getBacktestFolderName(self):
-        return self.backtestFolderName
+    def getHistoricalWeights(self, formatOut="DataFrame"):
+        return self._format_history(self.historicalWeights, None, formatOut, nested=True)
+    def getHistoricalPositions(self, formatOut="DataFrame"):
+        return self._format_history(self.historicalPositions, None, formatOut, nested=True)
+    def getHistoricalNAV(self, formatOut="DataFrame"):
+        return self._format_history(self.historicalNAV, "Historical NAV", formatOut)
+    def getHistoricalTCosts(self, formatOut="DataFrame"):
+        return self._format_history(self.historicalTCosts, "Cumulative Transaction Costs", formatOut)
+    def getHistoricalSlippageCosts(self, formatOut="DataFrame"):
+        return self._format_history(self.historicalSlippageCosts, "Cumulative Slippage Costs", formatOut)
+    def getHistoricalBorrowCosts(self, formatOut="DataFrame"):
+        return self._format_history(self.historicalBorrowCosts, "Daily Borrow Costs", formatOut)
+    def getHistoricalCash(self, formatOut="DataFrame"):
+        return self._format_history(self.historicalCash, "Historical Cash Account", formatOut)
 
-    def getPositions(self):
-        return self.positions
+    def getPerformanceStatistics(self, historical=False):
+        stats = pd.DataFrame.from_dict(self._performance_rows(), orient="index")
+        return stats if historical or stats.empty else stats.tail(1)
 
-    def getAssetPosition(self,asset):
-        return self.positions[asset]
-    
-    def getCash(self):
-        return self.cash
+    def _performance_rows(self):
+        """Return per-date statistics (cached; recomputed when new days appear)."""
+        if len(self.performanceStatistics) == len(self.historicalNAV):
+            return self.performanceStatistics
+        items = list(self.historicalNAV.items())
+        rows = {}
+        for index, (date, _) in enumerate(items):
+            rows[date] = self._performance_at_index(items, index)
+        self.performanceStatistics = rows
+        return rows
 
-    def getTransactionCosts(self):
-        return self.transactionCosts
-    
-    def getAssetsInPortfolio(self):
-        return list(self.positions.keys())
+    def _performance_at(self, date):
+        items = list(self.historicalNAV.items())
+        index = next((i for i, (d, _) in enumerate(items) if d == date), None)
+        if index is None:
+            raise KeyError(f"No NAV recorded for date {date}")
+        return self._performance_at_index(items, index)
 
-    def getFixedTransactionCosts(self,asset):
-        if asset not in self.fixedTransactionCosts.keys():
+    def _performance_at_index(self, items, index):
+        """Summaries over the history prefix ending at ``items[index]``."""
+        prefix = dict(items[: index + 1])
+        if self.historicalTCosts:
+            prefix_costs = {date: self.historicalTCosts[date] for date, _ in items[: index + 1]}
+        else:
+            prefix_costs = None
+        return performanceSummary(prefix, historicalTCosts=prefix_costs)
+
+    def setCash(self, cash):
+        if not isinstance(cash, Real) or isinstance(cash, bool):
+            raise TypeError("cash must be numeric")
+        self.cash = float(cash)
+
+    def _set_dict(self, attribute, value, description):
+        if not isinstance(value, dict):
+            raise TypeError(f"{description} must be a dictionary")
+        setattr(self, attribute, value)
+
+    def setFixedTransactionCosts(self, value): self._set_dict("fixedTransactionCosts", value, "Transaction costs")
+    def setBorrowCosts(self, value): self._set_dict("borrowCosts", value, "Borrow costs")
+    def setImpactParams(self, value): self._set_dict("impactParams", value, "Impact parameters")
+    def setAnnualManagementFee(self, value): self.annualManagementFee = float(value)
+    def setTransactionCosts(self, value): self.transactionCosts = float(value)
+    def setSlippageCosts(self, value): self.slippageCosts = float(value)
+    def setUnwindUndefinedAssetWeights(self, value): self.unwindUndefinedAssetWeights = bool(value)
+    def setAllowNegativeCash(self, value): self.allowNegativeCash = bool(value)
+
+    def setSlippageModel(self, model):
+        if model not in {"", "squarerootimpact"}:
+            raise ValueError("slippageModel must be 'squarerootimpact' or ''")
+        self.slippageModel = model
+
+    def _set_rebalance_date(self, attribute, date):
+        if not isinstance(date, pd.Timestamp):
+            raise TypeError("Rebalance date must be a pandas Timestamp")
+        setattr(self, attribute, date)
+    def setFirstRebalanceDate(self, date): self._set_rebalance_date("FirstRebalanceDate", date)
+    def setLastRebalanceDate(self, date): self._set_rebalance_date("LastRebalanceDate", date)
+
+    def setCustomData(self, date, data_dict):
+        if not isinstance(date, pd.Timestamp) or not isinstance(data_dict, dict):
+            raise TypeError("Custom data requires a pandas Timestamp and dictionary")
+        self.customData[date] = data_dict
+
+    def plotNAV(self): return getNAVPlot(self)
+    def plotWeights(self): return getWeightsPlot(self)
+
+    def buy(self, asset, quantity, lastPriceMap):
+        if quantity < 0: raise ValueError("quantity must be non-negative")
+        self.positions[asset] = self.positions.get(asset, 0.0) + quantity
+        self.cash -= quantity * lastPriceMap[asset]
+
+    def sell(self, asset, quantity, lastPriceMap):
+        if quantity < 0: raise ValueError("quantity must be non-negative")
+        self.positions[asset] = self.positions.get(asset, 0.0) - quantity
+        self.cash += quantity * lastPriceMap[asset]
+
+    def calcDailyBorrowCost(self, lastPriceMap):
+        return sum(
+            abs(position * lastPriceMap[asset]) * ((1 + self.getBorrowCost(asset)) ** (1 / 260) - 1)
+            for asset, position in self.positions.items() if position < 0
+        )
+
+    def _fixed_cost(self, asset, units, price):
+        return abs(units) * price * self.getFixedTransactionCosts(asset)
+
+    def _slippage_cost(self, asset, units, price, is_initial_rebalance):
+        if self.slippageModel != "squarerootimpact" or is_initial_rebalance or not units:
             return 0.0
-        else:
-            return self.fixedTransactionCosts[asset]
-    
-    def getAllFixedTransactionCosts(self):
-        return self.fixedTransactionCosts
-    
-    def getBorrowCost(self,asset):
-        if asset not in self.borrowCosts.keys():
-            return 0.0
-        else:
-            return self.borrowCosts[asset]
+        params = self.impactParams.get(asset)
+        if params is None:
+            raise ValueError(
+                f"slippageModel 'squarerootimpact' requires setImpactParams(...) "
+                f"for every traded asset; missing parameters for asset {asset!r}."
+            )
+        missing_keys = [key for key in ("BidAskSpread", "ScalingFactor", "Volatility", "ADV") if key not in params]
+        if missing_keys:
+            raise ValueError(
+                f"Impact parameters for asset {asset!r} are missing keys: {missing_keys}. "
+                f"Expected 'BidAskSpread', 'ScalingFactor', 'Volatility' (annualised) and 'ADV'."
+            )
+        impact = params["BidAskSpread"] + params["ScalingFactor"] * params["Volatility"] * math.sqrt(abs(units) / params["ADV"] / 252)
+        return abs(units) * price * impact
 
-    def getAllBorrowCosts(self):
-        return self.borrowCosts
+    def _execute_trade(self, asset, units, lastPriceMap, is_initial_rebalance):
+        if not units:
+            return
+        price = lastPriceMap[asset]
+        (self.buy if units > 0 else self.sell)(asset, abs(units), lastPriceMap)
+        fixed_cost = self._fixed_cost(asset, units, price)
+        slippage_cost = self._slippage_cost(asset, units, price, is_initial_rebalance)
+        self.cash -= fixed_cost + slippage_cost
+        self.transactionCosts += fixed_cost
+        self.slippageCosts += slippage_cost
 
-    def getAnnualManagementFee(self):
-        return self.annualManagementFee
-    
-    def getBacktestTimestamp(self):
-        return self.timestamp
+    def _validate_prices(self, lastPriceMap, assets, date):
+        """Fail fast with an actionable error when a needed price is missing.
 
-    def getFirstRebalanceDate(self):
-        return self.FirstRebalanceDate
-    
-    def getLastRebalanceDate(self):
-        return self.LastRebalanceDate
+        Without this, missing/NaN prices would either raise a bare ``KeyError``
+        mid-backtest or silently poison the NAV/statistics with NaN values.
+        """
+        missing = []
+        for asset in assets:
+            price = lastPriceMap.get(asset)
+            if price is None:
+                missing.append(asset)
+                continue
+            try:
+                finite = math.isfinite(float(price))
+            except (TypeError, ValueError):
+                finite = False
+            if not finite:
+                missing.append(asset)
+        if missing:
+            raise ValueError(
+                f"Missing or non-finite price(s) at {date.strftime('%Y-%m-%d')}: {missing}. "
+                f"Provide a lastPriceMap covering all held/targeted assets "
+                f"(e.g. forward-fill or last-known prices for delisted series)."
+            )
 
-    def getSlippageModel(self):
-        return self.slippageModel
+    @staticmethod
+    def _costs_since(costs_before, transaction_costs, slippage_costs):
+        return (transaction_costs - costs_before[0]) + (slippage_costs - costs_before[1])
 
-    def getSlippageCosts(self):
-        return self.slippageCosts
-    
-    def getImpactParams(self):
-        return self.impactParams
+    def _enforce_cash_floor(self, costs_before, date):
+        """Reject unfunded trades unless allowNegativeCash has been enabled."""
+        if self.allowNegativeCash:
+            return
+        # Trading costs are the only legitimate reason a fully-invested book
+        # ends a rebalance slightly cash-negative.
+        costs_incurred = self._costs_since(
+            costs_before, self.transactionCosts, self.slippageCosts
+        )
+        if self.cash < -(costs_incurred + 1e-6):
+            raise ValueError(
+                f"Rebalance at {date.strftime('%Y-%m-%d')} would leave cash at "
+                f"{self.cash:.2f}, below what trading costs ({costs_incurred:.2f}) can "
+                f"explain - target weights exceed available cash (implicit leverage). "
+                f"Call setAllowNegativeCash(True) to permit this deliberately."
+            )
 
-    def getCustomData(self):
-        return self.customData
-
-    def getCustomDataByDate(self,date):
-        if date in list(self.customData.keys()):
-            return self.customData[date]
-        else:
-            return dict()
-    
-    def getWeights(self,lastPriceMap):
-        weights = {}
-        currentNAV = self.getNAV(lastPriceMap)
-
-        for asset in self.getPositions():
-            price = lastPriceMap[asset]
-            weights[asset] = price * self.getAssetPosition(asset) / currentNAV
-        
-        return weights
-    
-    def getHistoricalWeights(self,formatOut='DataFrame'):
-        if formatOut.lower() == 'dataframe':
-            flatDictionary = flattenDictionary(self.historicalWeights)
-            temp = pd.DataFrame.from_dict(flatDictionary).set_index('Dates')
-            return temp
-        
-        elif formatOut.lower() == 'dictionary':
-            return self.historicalWeights
-        
-        else:
-            raise Exception('ERROR: Invalid Historical Weight Output Format')
-
-    def getNAV(self,lastPriceMap):
-        positionValue = float(0.0)
-
-        # Mark to market all assets
-        for asset in self.getPositions():
-            positionValue += lastPriceMap[asset] * self.getAssetPosition(asset)
-        
-        # Add cash account
-        value = positionValue + self.getCash()
-
-        return value
-
-    def getHistoricalNAV(self,formatOut='DataFrame'):
-        if formatOut.lower() == 'dataframe':
-            temp = pd.DataFrame(self.historicalNAV,index=[0],).T
-            temp.columns = ['Historical NAV']
-            return temp
-        elif formatOut.lower() == 'dictionary':
-            return self.historicalNAV
-        else:
-            raise Exception('ERROR: Invalid Historical NAV Output Format')
-
-    def getHistoricalPositions(self,formatOut='DataFrame'):
-        if formatOut.lower() == 'dataframe':
-            flatDictionary = flattenDictionary(self.historicalPositions)
-            temp = pd.DataFrame.from_dict(flatDictionary).set_index('Dates')
-            return temp
-        
-        elif formatOut.lower() == 'dictionary':
-            return self.historicalPositions
-        
-        else:
-            raise Exception('ERROR: Invalid Historical Positions Output Format')
-    
-    def getHistoricalTCosts(self,formatOut='DataFrame'):
-        if formatOut.lower() == 'dataframe':
-            temp = pd.DataFrame(self.historicalTCosts,index=[0],).T
-            temp.columns = ['Cumulative Transaction Costs']
-            return temp
-        elif formatOut.lower() == 'dictionary':
-            return self.historicalTCosts
-        else:
-            raise Exception('ERROR: Invalid Historical Transaction Costs Output Format')
-
-    def getHistoricalSlippageCosts(self,formatOut='DataFrame'):
-        if formatOut.lower() == 'dataframe':
-            temp = pd.DataFrame(self.historicalSlippageCosts,index=[0],).T
-            temp.columns = ['Cumulative Slippage Costs']
-            return temp
-        elif formatOut.lower() == 'dictionary':
-            return self.historicalSlippageCosts
-        else:
-            raise Exception('ERROR: Invalid Historical Slippage Costs Output Format')
-
-    def getHistoricalBorrowCosts(self,formatOut='DataFrame'):
-        if formatOut.lower() == 'dataframe':
-            temp = pd.DataFrame(self.historicalBorrowCosts,index=[0],).T
-            temp.columns = [ 'Daily Borrow Costs']
-            return temp
-        elif formatOut.lower() == 'dictionary':
-            return self.historicalBorrowCosts
-        else:
-            raise Exception('ERROR: Invalid Historical Borrow Costs Output Format')
-    
-    def getHistoricalCash(self,formatOut='DataFrame'):
-        if formatOut.lower() == 'dataframe':
-            temp = pd.DataFrame(self.historicalCash,index=[0],).T
-            temp.columns = ['Historical Cash Account']
-            return temp
-        elif formatOut.lower() == 'dictionary':
-            return self.historicalCash
-        else:
-            raise Exception('ERROR: Invalid Historical Cash Account Output Format')
-    
-    def getPerformanceStatistics(self,historical=False):
-        perfStats = pd.DataFrame.from_dict(self.performanceStatistics,orient='index')
-        
-        if historical == False:
-            return perfStats.iloc[[-1]]
-        else:
-            return perfStats
-
-    # Set Methods
-    def setCash(self,cash):
-        if isinstance(cash,float):
-            self.cash = cash
-        else:
-            raise Exception('ERROR: Cash must be a float number')
-
-    def setFixedTransactionCosts(self,fixedTransactionCosts):
-        if isinstance(fixedTransactionCosts,dict):
-            self.fixedTransactionCosts = fixedTransactionCosts
-        else:
-            raise Exception('ERROR: Transaction costs must be a dictionary of asset names and costs')
-    
-    def setBorrowCosts(self,fixedBorrowCosts):
-        if isinstance(fixedBorrowCosts,dict):
-            self.borrowCosts = fixedBorrowCosts
-        else:
-            raise Exception('ERROR: Borrow costs must be a dictionary of asset names and annualized costs')
-    
-    def setSlippageModel(self,slippageModel):
-        validSlippageModels = ['squarerootimpact']
-
-        if slippageModel in validSlippageModels:
-            self.slippageModel = slippageModel
-        else:
-            raise Exception(f'ERROR: Choose from {",".join(validSlippageModels)}')
-    
-    def setImpactParams(self,impactParams):
-        if isinstance(impactParams,dict):
-            self.impactParams = impactParams
-        else:
-            raise Exception('ERROR: Impact Parameters must be a dictionary')
-    
-    def setAnnualManagementFee(self,annualManagementFee):
-        self.annualManagementFee = annualManagementFee
-
-    def setFirstRebalanceDate(self,date):
-        if isinstance(date,pd.Timestamp):
+    def rebalance(self, targetWeights, lastPriceMap, date):
+        if not isinstance(date, pd.Timestamp):
+            raise TypeError("Rebalance date must be a pandas Timestamp")
+        self._validate_prices(
+            lastPriceMap,
+            {asset for asset, position in self.positions.items() if position} | set(targetWeights),
+            date,
+        )
+        current_nav = self.getNAV(lastPriceMap)
+        costs_before = (self.transactionCosts, self.slippageCosts)
+        is_initial_rebalance = self.FirstRebalanceDate is None
+        if is_initial_rebalance:
             self.FirstRebalanceDate = date
-        else:
-            raise Exception('ERROR: First Rebalance Date must be a pandas datetime object')
-    
-    def setLastRebalanceDate(self,date):
-        if isinstance(date,pd.Timestamp):
-            self.LastRebalanceDate = date
-        else:
-            raise Exception('ERROR: Last Rebalance Date must be a pandas datetime object')
-
-    def setCustomData(self,date,data_dict):
-        if isinstance(date,pd.Timestamp) and isinstance(data_dict,dict):
-            self.customData[date] = data_dict
-        else:
-            raise Exception('ERROR: Custom data must be a dictionary with pandas datetime as keys')
-    
-    def setUnwindUndefinedAssetWeights(self,unwindUndefinedAssetWeights):
-        self.unwindUndefinedAssetWeights = unwindUndefinedAssetWeights
-
-    def setTransactionCosts(self,transactionCosts):
-        self.transactionCosts = transactionCosts
-    
-    def setSlippageCosts(self,slippageCosts):
-        self.slippageCosts = slippageCosts
-        
-    # Analytics methods
-    def plotNAV(self):
-        return getNAVPlot(self)
-
-    def plotWeights(self):
-        return getWeightsPlot(self)
-
-    # Portfolio Object Methods
-    def buy(self,asset,quantity,lastPriceMap):
-        if asset in self.getAssetsInPortfolio():
-            self.positions[asset] += quantity
-            if self.getAssetPosition(asset) < 0:
-                # Adjust cash account if asset still has an overall short position
-                self.setCash(self.getCash() + (-1 * self.getAssetPosition(asset) * lastPriceMap[asset]))
-        else:
-            self.positions[asset] = quantity
-    
-    def sell(self,asset,quantity,lastPriceMap):
-        if asset in self.getAssetsInPortfolio():
-            self.positions[asset] -= quantity
-            if self.getAssetPosition(asset) < 0:
-                # Adjust cash account if asset still has an overall short position
-                self.setCash(self.getCash() + (-1 * self.getAssetPosition(asset) * lastPriceMap[asset]))
-        else:
-            self.positions[asset] = -1 * quantity
-            self.setCash(self.getCash() + (quantity * lastPriceMap[asset]))
-    
-    def calcDailyBorrowCost(self,lastPriceMap):
-        # Initialize Zero Costs
-        borrowCostCollector = 0.0
-        
-        # Check if portfolio positions are empty
-        if len(self.positions) > 0:
-            for asset,position in self.positions.items():
-                # Only short positions incur borrow costs (annualized)
-                if position < 0 :
-                    borrowCostCollector += abs(position * lastPriceMap[asset] * ((1 + self.getBorrowCost(asset)) ** (1/260) - 1))
-
-        return borrowCostCollector
-    
-    def signOff(self,date,lastPriceMap):
-        # Add annual management fees
-        managementFee = self.getNAV(lastPriceMap) * ((1 + self.getAnnualManagementFee()) ** (1/260) - 1)
-        
-        # TODO: Compute net interest in cash account
-        # interestCash = self.getCash() * overnightLIBOR * (1/252)
-
-        # Add Borrow Costs
-        borrowCosts = self.calcDailyBorrowCost(lastPriceMap)
-
-        self.setCash(self.getCash() - managementFee - borrowCosts)
-
-        # Historical daily states
-        self.historicalPositions[date] = copy.deepcopy(self.getPositions())
-        self.historicalNAV[date] = float(copy.deepcopy(self.getNAV(lastPriceMap)))
-        self.historicalWeights[date] = copy.deepcopy(self.getWeights(lastPriceMap))
-        self.historicalTCosts[date] = float(copy.deepcopy(self.getTransactionCosts()))
-        self.historicalSlippageCosts[date] = float(copy.deepcopy(self.getSlippageCosts()))
-        self.historicalBorrowCosts[date] = float(copy.deepcopy(borrowCosts))
-        self.historicalCash[date] = float(copy.deepcopy(self.getCash()))
-
-        # Compute Performance Statistics
-        self.performanceStatistics[date] = performanceSummary(
-            self.historicalNAV,
-            self.historicalWeights,
-            self.historicalPositions,
-            self.historicalTCosts,
-            self.historicalSlippageCosts)
-
-        # Serialize Data
-        if self.datadump == True:
-            dataDump = self.getBacktestFolderName() + '/' + date.strftime('%Y-%m-%d') + '.json'
-
-            dailyNode = [{
-                'Date'                 : date.strftime('%Y-%m-%d'),
-                'NAV'                  : self.historicalNAV[date],
-                'Cash'                 : self.getCash(),
-                'FirstRebalanceDate'   : self.getFirstRebalanceDate(),
-                'LastRebalanceDate'    : self.getLastRebalanceDate(),
-                'TransactionCosts'     : self.getTransactionCosts(),
-                'FixedTransactionCosts': self.getAllFixedTransactionCosts(),
-                'DailyBorrowCost'      : self.historicalBorrowCosts[date],
-                'SlippageModel'        : self.getSlippageModel(),
-                'Positions'            : self.getPositions(),
-                'Weights'              : self.getWeights(lastPriceMap),
-                'Performance'          : self.performanceStatistics[date],
-                'CustomData'           : self.getCustomDataByDate(date)
-            }]
-
-            # TODO: Fix date serialization instead of string defaults
-            with open(dataDump,'w') as fd:
-                fd.write(json.dumps(dailyNode, indent=2, default=str))
-    
-    # Default rebalance function
-    def rebalance(self,targetWeights,lastPriceMap,date):
-        # Current NAV is the market to market using latest positions, current close prices and cash account
-        currentNAV = self.getNAV(lastPriceMap)
-
-        # Clean up the cash account at every rebalance
-        # This assumes we buy lesser units when transaction costs are factored in rather than having residual cash balances
-        self.setCash(0.0)
-
-        # Initialize Slippage Costs
-        slippageCosts = 0.0
-
-        # Initialized Fixed Transaction Costs
-        tCosts = 0.0
-
-        # Save the most recent rebalance date
         self.LastRebalanceDate = date
 
-        # Initialize the first rebalance date
-        if self.getFirstRebalanceDate() == 'N/A':
-            self.setFirstRebalanceDate(date)
-        
-        # Define the treatment of undefined assets which are previously in the portfolio
-        if self.unwindUndefinedAssetWeights == True:
-            for asset in self.getAssetsInPortfolio():
-                # Unwind assets not in target weights dictionary
-                if (asset in list(targetWeights.keys())) == False:
+        if self.unwindUndefinedAssetWeights:
+            for asset, position in list(self.positions.items()):
+                if asset not in targetWeights:
+                    self._execute_trade(asset, -position, lastPriceMap, is_initial_rebalance)
 
-                    if self.getAssetPosition(asset) > 0:
-                        self.sell(asset,self.getAssetPosition(asset),lastPriceMap[asset])
-                    else:
-                        self.buy(asset,-1*self.getAssetPosition(asset),lastPriceMap[asset])
+        for asset, weight in targetWeights.items():
+            target_units = weight * current_nav / lastPriceMap[asset]
+            self._execute_trade(asset, target_units - self.positions.get(asset, 0.0), lastPriceMap, is_initial_rebalance)
 
-                    if len(self.fixedTransactionCosts) > 0:
-                        tCosts = abs(self.getAssetPosition(asset) * lastPriceMap[asset] * self.getFixedTransactionCosts(asset))
-                    
-                    if self.getSlippageModel() == 'squarerootimpact':
-                        impactParams = self.getImpactParams()
-                        ADV = impactParams[asset]['ADV']
-                        vol = impactParams[asset]['Volatility']
-                        spreadCost = impactParams[asset]['BidAskSpread']
-                        scalingFactor = impactParams[asset]['ScalingFactor']
+        self._enforce_cash_floor(costs_before, date)
 
-                        slippage = spreadCost + scalingFactor*(1/math.sqrt(252))*vol*math.sqrt(abs(self.getAssetPosition(asset))/ADV)
+    def signOff(self, date, lastPriceMap):
+        self._validate_prices(
+            lastPriceMap,
+            {asset for asset, position in self.positions.items() if position},
+            date,
+        )
+        management_fee = self.getNAV(lastPriceMap) * ((1 + self.annualManagementFee) ** (1 / 260) - 1)
+        borrow_costs = self.calcDailyBorrowCost(lastPriceMap)
+        self.cash -= management_fee + borrow_costs
+        self.historicalPositions[date] = copy.deepcopy(self.positions)
+        self.historicalNAV[date] = float(self.getNAV(lastPriceMap))
+        self.historicalWeights[date] = copy.deepcopy(self.getWeights(lastPriceMap))
+        self.historicalTCosts[date] = self.transactionCosts
+        self.historicalSlippageCosts[date] = self.slippageCosts
+        self.historicalBorrowCosts[date] = borrow_costs
+        self.historicalCash[date] = self.cash
+        # Performance statistics are computed lazily (see _performance_at /
+        # _performance_rows) so the daily loop stays linear.
+        if self.datadump:
+            self._write_daily_dump(date, lastPriceMap)
 
-                        slippageCosts = abs(self.getAssetPosition(asset)) * lastPriceMap[asset] * slippage
-
-                        # Account for slippage in cash account
-                        self.setCash(self.getCash() - slippageCosts)
-
-                        # Add to cumulative transaction costs
-                        self.setSlippageCosts(self.getSlippageCosts + slippageCosts)
-
-        # Loop through all target trade intentions
-        for asset in targetWeights:
-            singleAssetTargetUnits = targetWeights[asset] * currentNAV / lastPriceMap[asset]
-
-            if asset in self.getPositions():
-                unitsToTrade = singleAssetTargetUnits - self.getAssetPosition(asset)
-            else:
-                unitsToTrade = singleAssetTargetUnits
-
-            # Note: Sell/Buy function only accept POSITIVE quantities, the sign is handled in the methods
-            if unitsToTrade >= 0:
-                self.buy(asset,unitsToTrade,lastPriceMap)
-            
-            else:
-                self.sell(asset,-1*unitsToTrade,lastPriceMap)
-
-            # Account for fixed transaction costs
-            if len(self.fixedTransactionCosts) > 0:
-
-                tCosts = abs(unitsToTrade) * lastPriceMap[asset] * self.getFixedTransactionCosts(asset)
-
-                # Deduct transaction costs from cash account
-                self.setCash(self.getCash() - tCosts)
-
-                # Add to cumulative transaction costs
-                self.setTransactionCosts(self.getTransactionCosts() + tCosts)
-
-            # Account for slippage costs
-            if self.getSlippageModel() == 'squarerootimpact':
-                impactParams = self.getImpactParams()
-                ADV = impactParams[asset]['ADV']
-                vol = impactParams[asset]['Volatility']
-                spreadCost = impactParams[asset]['BidAskSpread']
-                scalingFactor = impactParams[asset]['ScalingFactor']
-
-                # Do not account for the impact of funding portfolio in slippage
-                if date == self.getFirstRebalanceDate():
-                    slippage = 0.0
-                else:
-                    slippage = spreadCost + scalingFactor*(1/math.sqrt(252))*vol*math.sqrt(abs(self.getAssetPosition(asset))/ADV)
-                
-                slippageCosts = abs(unitsToTrade) * lastPriceMap[asset] * slippage
-
-                # Deduct slippage from cash account
-                self.setCash(self.getCash() - slippageCosts)
-
-                # Add to cumulative slippage costs
-                self.setSlippageCosts(self.getSlippageCosts() + slippageCosts)
-
-        # Account for leverage in the portfolio
-        # Check long positions and how much cash we need to borrow against
-        longPositions = sum([targetWeights[asset] if targetWeights[asset] > 0 else 0 for asset in targetWeights])
-
-        excessCash = (1.0 - longPositions) * currentNAV
-
-        # Adjust cash account
-        self.setCash(self.getCash() + excessCash)
-
-
-
-
-
-
-            
-
-
-
-        
-
-        
+    def _write_daily_dump(self, date, lastPriceMap):
+        self.backtestFolderName.mkdir(parents=True, exist_ok=True)
+        daily_node = {"Date": date.strftime("%Y-%m-%d"), "NAV": self.historicalNAV[date], "Cash": self.cash,
+                      "FirstRebalanceDate": self.FirstRebalanceDate, "LastRebalanceDate": self.LastRebalanceDate,
+                      "TransactionCosts": self.transactionCosts, "FixedTransactionCosts": self.fixedTransactionCosts,
+                      "DailyBorrowCost": self.historicalBorrowCosts[date], "SlippageModel": self.slippageModel,
+                      "Positions": self.positions, "Weights": self.getWeights(lastPriceMap),
+                      "Performance": self._performance_at(date), "CustomData": self.getCustomDataByDate(date)}
+        path = self.backtestFolderName / f"{date:%Y-%m-%d}.json"
+        path.write_text(json.dumps([sanitizeJSON(daily_node)], indent=2, default=str, allow_nan=False))
