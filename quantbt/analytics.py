@@ -5,6 +5,12 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
+try:
+    import matplotlib.pyplot as plt
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+
 
 TRADING_DAYS = 260
 
@@ -118,9 +124,154 @@ def performanceSummary(
 
 
 def getNAVPlot(port):
+    if not MATPLOTLIB_AVAILABLE:
+        raise ImportError("matplotlib is required for plotting. Install it with: pip install matplotlib")
     return port.getHistoricalNAV().plot(figsize=(7.5, 5), title=port.getPortfolioName())
 
 
 def getWeightsPlot(port):
+    if not MATPLOTLIB_AVAILABLE:
+        raise ImportError("matplotlib is required for plotting. Install it with: pip install matplotlib")
     name = port.getPortfolioName()
     return port.getHistoricalWeights().plot(figsize=(7.5, 5), title=f"{name} Weights")
+
+
+def generateTearsheet(port, save_path: Optional[str] = None):
+    """Generate a comprehensive tearsheet/dashboard of backtest results.
+    
+    Creates a multi-panel figure showing:
+    - NAV performance over time
+    - Portfolio weights over time
+    - Drawdown analysis
+    - Performance statistics summary
+    
+    Args:
+        port: Portfolio object with historical data
+        save_path: Optional path to save the figure as PNG
+        
+    Returns:
+        matplotlib Figure object
+    """
+    if not MATPLOTLIB_AVAILABLE:
+        raise ImportError("matplotlib is required for tearsheet generation. Install it with: pip install matplotlib")
+    
+    historical_nav = port.getHistoricalNAV()
+    historical_weights = port.getHistoricalWeights()
+    historical_cash = port.getHistoricalCash()
+    
+    # Create figure with subplots
+    fig = plt.figure(figsize=(16, 12))
+    fig.suptitle(f"{port.getPortfolioName()} - Backtest Tearsheet", fontsize=16, fontweight='bold')
+    
+    # NAV plot
+    ax1 = plt.subplot(3, 2, 1)
+    historical_nav.plot(ax=ax1, title="NAV Performance")
+    ax1.set_ylabel("NAV")
+    ax1.grid(True, alpha=0.3)
+    
+    # Weights plot
+    ax2 = plt.subplot(3, 2, 2)
+    historical_weights.plot(ax=ax2, title="Portfolio Weights")
+    ax2.set_ylabel("Weight")
+    ax2.grid(True, alpha=0.3)
+    
+    # Drawdown plot
+    ax3 = plt.subplot(3, 2, 3)
+    nav_values = historical_nav.iloc[:, 0].values
+    running_max = np.maximum.accumulate(nav_values)
+    drawdown = (nav_values / running_max - 1) * 100
+    ax3.plot(historical_nav.index, drawdown, color='red', label='Drawdown')
+    ax3.fill_between(historical_nav.index, drawdown, 0, color='red', alpha=0.3)
+    ax3.set_title("Drawdown (%)")
+    ax3.set_ylabel("Drawdown %")
+    ax3.grid(True, alpha=0.3)
+    ax3.legend()
+    
+    # Cash plot
+    ax4 = plt.subplot(3, 2, 4)
+    historical_cash.plot(ax=ax4, title="Cash Account")
+    ax4.set_ylabel("Cash")
+    ax4.grid(True, alpha=0.3)
+    
+    # Returns distribution
+    ax5 = plt.subplot(3, 2, 5)
+    returns = np.diff(nav_values) / nav_values[:-1] * 100
+    ax5.hist(returns, bins=30, edgecolor='black', alpha=0.7)
+    ax5.set_title("Daily Returns Distribution (%)")
+    ax5.set_xlabel("Return %")
+    ax5.set_ylabel("Frequency")
+    ax5.grid(True, alpha=0.3)
+    
+    # Performance statistics table
+    ax6 = plt.subplot(3, 2, 6)
+    ax6.axis('off')
+    stats = port.getPerformanceStatistics(historical=False)
+    stats_text = "Performance Statistics:\n\n"
+    for col in stats.columns:
+        stats_text += f"{col}:\n"
+        for idx, val in stats[col].items():
+            if isinstance(val, float):
+                stats_text += f"  {idx}: {val:.4f}\n"
+            else:
+                stats_text += f"  {idx}: {val}\n"
+        stats_text += "\n"
+    ax6.text(0.1, 0.9, stats_text, transform=ax6.transAxes, 
+             verticalalignment='top', fontsize=10, family='monospace')
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    
+    return fig
+
+
+def exportToExcel(port, file_path: str) -> None:
+    """Export backtest results to Excel file.
+    
+    Creates an Excel file with multiple sheets containing:
+    - Historical NAV
+    - Historical Weights
+    - Historical Positions
+    - Historical Cash
+    - Performance Statistics
+    - Transaction Costs
+    
+    Args:
+        port: Portfolio object with historical data
+        file_path: Path to save the Excel file
+    """
+    try:
+        import pandas as pd
+    except ImportError:
+        raise ImportError("pandas is required for Excel export. Install it with: pip install pandas")
+    
+    try:
+        from openpyxl import Workbook
+    except ImportError:
+        raise ImportError("openpyxl is required for Excel export. Install it with: pip install openpyxl")
+    
+    with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
+        # Historical NAV
+        port.getHistoricalNAV().to_excel(writer, sheet_name='NAV')
+        
+        # Historical Weights
+        port.getHistoricalWeights().to_excel(writer, sheet_name='Weights')
+        
+        # Historical Positions
+        port.getHistoricalPositions().to_excel(writer, sheet_name='Positions')
+        
+        # Historical Cash
+        port.getHistoricalCash().to_excel(writer, sheet_name='Cash')
+        
+        # Historical Transaction Costs
+        port.getHistoricalTCosts().to_excel(writer, sheet_name='Transaction Costs')
+        
+        # Historical Slippage Costs
+        port.getHistoricalSlippageCosts().to_excel(writer, sheet_name='Slippage Costs')
+        
+        # Historical Borrow Costs
+        port.getHistoricalBorrowCosts().to_excel(writer, sheet_name='Borrow Costs')
+        
+        # Performance Statistics
+        port.getPerformanceStatistics(historical=True).to_excel(writer, sheet_name='Performance Stats')
