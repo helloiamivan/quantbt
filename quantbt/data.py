@@ -26,9 +26,9 @@ class CsvDataHandler:
 
     @staticmethod
     def _format(data, formatOut):
-        result = data if formatOut.lower() == "dataframe" else data.to_dict(orient="index")
         if formatOut.lower() not in {"dataframe", "dictionary"}:
             raise ValueError("formatOut must be 'dataframe' or 'dictionary'")
+        result = data if formatOut.lower() == "dataframe" else data.to_dict(orient="index")
         return data.index, result
 
 
