@@ -1,6 +1,6 @@
 """Tools for researching and backtesting quantitative investment strategies."""
 
-from .analytics import getNAVPlot, getWeightsPlot, performanceSummary
+from .analytics import getNAVPlot, getWeightsPlot, performanceSummary, generateTearsheet, exportToExcel
 from .portfolio import Portfolio
 
 # The data handlers are imported lazily (PEP 562) so that the optional
@@ -16,6 +16,8 @@ __all__ = [
     "performanceSummary",
     "getNAVPlot",
     "getWeightsPlot",
+    "generateTearsheet",
+    "exportToExcel",
 ]
 
 

@@ -10,7 +10,7 @@ setup(
     author_email='ivanchanzhenghao@gmail.com',
     url='https://github.com/helloiamivan/quantbt',
     packages=find_packages(),
-    install_requires=["pandas", "numpy", "yfinance"],
+    install_requires=["pandas", "numpy", "yfinance", "matplotlib", "openpyxl"],
     python_requires=">=3.9",
 )
 

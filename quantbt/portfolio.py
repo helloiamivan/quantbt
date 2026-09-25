@@ -200,6 +200,12 @@ class Portfolio:
 
     def plotNAV(self): return getNAVPlot(self)
     def plotWeights(self): return getWeightsPlot(self)
+    def generateTearsheet(self, save_path=None):
+        from .analytics import generateTearsheet
+        return generateTearsheet(self, save_path)
+    def exportToExcel(self, file_path):
+        from .analytics import exportToExcel
+        return exportToExcel(self, file_path)
 
     def buy(self, asset, quantity, lastPriceMap):
         if quantity < 0: raise ValueError("quantity must be non-negative")
