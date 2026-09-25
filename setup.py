@@ -8,9 +8,9 @@ setup(
     description='Quantitative Research Finance',
     author='Ivan Chan',
     author_email='ivanchanzhenghao@gmail.com',
-    url='www.github.com/helloiamivan',
+    url='https://github.com/helloiamivan/quantbt',
     packages=find_packages(),
-    install_requires=["pandas", "matplotlib", "numpy", "yfinance"],
+    install_requires=["pandas", "numpy", "yfinance"],
     python_requires=">=3.9",
 )
 

@@ -1,6 +1,7 @@
 """Performance metrics and plotting helpers."""
 
 import datetime
+from typing import Any, Dict, Optional
 
 import numpy as np
 
@@ -47,12 +48,12 @@ def _trading_years_between(dates):
 
 
 def performanceSummary(
-    historicalNAV,
-    historicalWeights=None,
-    historicalPositions=None,
-    historicalTCosts=None,
-    historicalSlippageCosts=None,
-):
+    historicalNAV: Dict[Any, float],
+    historicalWeights: Optional[Dict[Any, Dict[str, float]]] = None,
+    historicalPositions: Optional[Dict[Any, Dict[str, float]]] = None,
+    historicalTCosts: Optional[Dict[Any, float]] = None,
+    historicalSlippageCosts: Optional[Dict[Any, float]] = None,
+) -> Dict[str, float]:
     """Return annualised performance statistics for a NAV history.
 
     The unused historical arguments are retained for backwards compatibility.
