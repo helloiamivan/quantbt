@@ -6,6 +6,7 @@ import math
 import time
 from numbers import Real
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
 
@@ -33,7 +34,7 @@ def sanitizeJSON(value):
 
 
 class Portfolio:
-    def __init__(self, positions, cash, name="", datadump=False, backtestFolderName=None):
+    def __init__(self, positions: Dict[str, float], cash: float, name: str = "", datadump: bool = False, backtestFolderName: Optional[str] = None):
         self.name = name
         self.positions = dict(positions)
         self.cash = float(cash)
@@ -69,7 +70,7 @@ class Portfolio:
     def getPortfolioName(self): return self.name
     def getBacktestFolderName(self): return str(self.backtestFolderName)
     def getPositions(self): return self.positions
-    def getAssetPosition(self, asset): return self.positions[asset]
+    def getAssetPosition(self, asset): return self.positions.get(asset, 0.0)
     def getCash(self): return self.cash
     def getTransactionCosts(self): return self.transactionCosts
     def getAssetsInPortfolio(self): return list(self.positions)
@@ -87,14 +88,14 @@ class Portfolio:
     def getCustomData(self): return self.customData
     def getCustomDataByDate(self, date): return self.customData.get(date, {})
 
-    def getNAV(self, lastPriceMap):
+    def getNAV(self, lastPriceMap: Dict[str, float]) -> float:
         return self.cash + sum(
             lastPriceMap[asset] * position
             for asset, position in self.positions.items()
             if position
         )
 
-    def getWeights(self, lastPriceMap):
+    def getWeights(self, lastPriceMap: Dict[str, float]) -> Dict[str, float]:
         nav = self.getNAV(lastPriceMap)
         if nav == 0:
             return {asset: math.nan for asset in self.positions if self.positions[asset]}
@@ -294,7 +295,7 @@ class Portfolio:
                 f"Call setAllowNegativeCash(True) to permit this deliberately."
             )
 
-    def rebalance(self, targetWeights, lastPriceMap, date):
+    def rebalance(self, targetWeights: Dict[str, float], lastPriceMap: Dict[str, float], date: pd.Timestamp) -> None:
         if not isinstance(date, pd.Timestamp):
             raise TypeError("Rebalance date must be a pandas Timestamp")
         self._validate_prices(
@@ -320,7 +321,7 @@ class Portfolio:
 
         self._enforce_cash_floor(costs_before, date)
 
-    def signOff(self, date, lastPriceMap):
+    def signOff(self, date: pd.Timestamp, lastPriceMap: Dict[str, float]) -> None:
         self._validate_prices(
             lastPriceMap,
             {asset for asset, position in self.positions.items() if position},
